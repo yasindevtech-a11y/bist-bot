@@ -14,6 +14,7 @@ Not: borsapy kişisel/eğitim amaçlı kullanım için ücretsizdir.
 
 import os
 import json
+from datetime import datetime, timezone
 import requests
 import borsapy as bp
 
@@ -24,14 +25,14 @@ import borsapy as bp
 # Taranacak evren: XUTUM = BIST'te işlem gören tüm hisseler
 UNIVERSE = "XUTUM"
 
-RSI_OVERSOLD = 30
-RSI_OVERBOUGHT = 70
+RSI_OVERSOLD = 40
+RSI_OVERBOUGHT = 60
 MA_PERIOD = 20
 
-# AL: RSI aşırı satımda VE fiyat 20 günlük ortalamayı yukarı kesiyor
-BUY_CONDITION = f"rsi < {RSI_OVERSOLD} and price crosses_above sma_{MA_PERIOD}"
-# SAT: RSI aşırı alımda VE fiyat 20 günlük ortalamayı aşağı kesiyor
-SELL_CONDITION = f"rsi > {RSI_OVERBOUGHT} and price crosses_below sma_{MA_PERIOD}"
+# AL: RSI düşük bölgede (gevşetilmiş eşik, kesişim şartı yok — daha sık sinyal)
+BUY_CONDITION = f"rsi < {RSI_OVERSOLD}"
+# SAT: RSI yüksek bölgede (gevşetilmiş eşik, kesişim şartı yok — daha sık sinyal)
+SELL_CONDITION = f"rsi > {RSI_OVERBOUGHT}"
 
 # Çok düşük hacimli/az işlem gören hisseleri elemek için asgari hacim (TL)
 MIN_VOLUME = 500_000
@@ -133,6 +134,8 @@ def main():
     # Daha önce sinyal verilmiş ama artık koşulu sağlamayan hisseleri sıfırla
     # ki koşul tekrar oluştuğunda yeniden bildirim gitsin
     for symbol in list(new_state.keys()):
+        if symbol.startswith("_"):
+            continue  # _heartbeat_date gibi özel anahtarları koru
         if symbol not in seen_symbols:
             new_state[symbol] = None
 
@@ -142,6 +145,20 @@ def main():
         print(full_message)
     else:
         print("Bu taramada yeni sinyal yok.")
+
+    # Günde bir kez, sinyal olsun olmasın, "bot çalışıyor" özet mesajı gönder
+    # (state dosyasında "_heartbeat_date" ile takip edilir, spam yapmaz)
+    today = datetime.now(timezone.utc).date().isoformat()
+    if new_state.get("_heartbeat_date") != today:
+        heartbeat = (
+            f"✅ Bot bugün ilk kez çalıştı ve piyasayı taradı.\n"
+            f"Şu anda {len(buy_hits)} hissede AL, {len(sell_hits)} hissede SAT "
+            f"koşulu görülüyor (hepsi daha önce bildirilmiş olabilir).\n"
+            f"Bot düzenli çalışıyor, her şey yolunda 👍"
+        )
+        send_telegram_message(heartbeat)
+        print(heartbeat)
+        new_state["_heartbeat_date"] = today
 
     save_state(new_state)
 
