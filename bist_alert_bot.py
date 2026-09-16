@@ -25,14 +25,20 @@ import borsapy as bp
 # Taranacak evren: XUTUM = BIST'te işlem gören tüm hisseler
 UNIVERSE = "XUTUM"
 
-RSI_OVERSOLD = 40
-RSI_OVERBOUGHT = 60
-MA_PERIOD = 20
+# RSI seviyelerine göre üç güven kademesi
+# Güçlü: çok nadir ama en belirgin uç nokta
+# Orta: dikkat çekici, kesin değil
+# Zayıf: sadece bilgilendirme, çok güvenme
+TIERS = [
+    {"name": "Güçlü", "emoji": "🔥", "buy_rsi": 20, "sell_rsi": 80},
+    {"name": "Orta", "emoji": "🟡", "buy_rsi": 30, "sell_rsi": 70},
+    {"name": "Zayıf", "emoji": "⚪", "buy_rsi": 40, "sell_rsi": 60},
+]
 
-# AL: RSI düşük bölgede (gevşetilmiş eşik, kesişim şartı yok — daha sık sinyal)
-BUY_CONDITION = f"rsi < {RSI_OVERSOLD}"
-# SAT: RSI yüksek bölgede (gevşetilmiş eşik, kesişim şartı yok — daha sık sinyal)
-SELL_CONDITION = f"rsi > {RSI_OVERBOUGHT}"
+# Tarama, en geniş aralığı (Zayıf kademe) kapsayacak şekilde yapılır,
+# sonra her hisse en uygun kademeye yerleştirilir
+BUY_CONDITION = f"rsi < {TIERS[-1]['buy_rsi']}"
+SELL_CONDITION = f"rsi > {TIERS[-1]['sell_rsi']}"
 
 # Çok düşük hacimli/az işlem gören hisseleri elemek için asgari hacim (TL)
 MIN_VOLUME = 500_000
@@ -71,6 +77,22 @@ def send_telegram_message(text: str) -> None:
             print(f"Telegram gönderim hatası: {resp.text}")
     except Exception as e:
         print(f"Telegram gönderim istisnası: {e}")
+
+
+def get_buy_tier(rsi: float):
+    """RSI değerine göre AL sinyali için kademe döner (en güçlüden başlar)."""
+    for tier in TIERS:
+        if rsi < tier["buy_rsi"]:
+            return tier
+    return None
+
+
+def get_sell_tier(rsi: float):
+    """RSI değerine göre SAT sinyali için kademe döner (en güçlüden başlar)."""
+    for tier in TIERS:
+        if rsi > tier["sell_rsi"]:
+            return tier
+    return None
 
 
 def run_scan(condition: str):
@@ -113,23 +135,37 @@ def main():
 
     for hit in buy_hits:
         symbol = hit["symbol"]
+        rsi = hit["rsi"]
+        if rsi is None:
+            continue
+        tier = get_buy_tier(rsi)
+        if tier is None:
+            continue
         seen_symbols.add(symbol)
-        if state.get(symbol) != "AL":
+        label = f"AL-{tier['name']}"
+        if state.get(symbol) != label:
             messages.append(
-                f"🟢 AL sinyali: {symbol}\n"
-                f"Fiyat: {hit['price']} TL | RSI: {round(hit['rsi'], 1) if hit['rsi'] else '-'}"
+                f"{tier['emoji']} {tier['name']} AL sinyali: {symbol}\n"
+                f"Fiyat: {hit['price']} TL | RSI: {round(rsi, 1)}"
             )
-            new_state[symbol] = "AL"
+            new_state[symbol] = label
 
     for hit in sell_hits:
         symbol = hit["symbol"]
+        rsi = hit["rsi"]
+        if rsi is None:
+            continue
+        tier = get_sell_tier(rsi)
+        if tier is None:
+            continue
         seen_symbols.add(symbol)
-        if state.get(symbol) != "SAT":
+        label = f"SAT-{tier['name']}"
+        if state.get(symbol) != label:
             messages.append(
-                f"🔴 SAT sinyali: {symbol}\n"
-                f"Fiyat: {hit['price']} TL | RSI: {round(hit['rsi'], 1) if hit['rsi'] else '-'}"
+                f"{tier['emoji']} {tier['name']} SAT sinyali: {symbol}\n"
+                f"Fiyat: {hit['price']} TL | RSI: {round(rsi, 1)}"
             )
-            new_state[symbol] = "SAT"
+            new_state[symbol] = label
 
     # Daha önce sinyal verilmiş ama artık koşulu sağlamayan hisseleri sıfırla
     # ki koşul tekrar oluştuğunda yeniden bildirim gitsin
@@ -139,8 +175,18 @@ def main():
         if symbol not in seen_symbols:
             new_state[symbol] = None
 
-    if messages:
-        full_message = f"📊 BIST Sinyal Botu ({len(messages)} yeni sinyal)\n\n" + "\n\n".join(messages)
+    # Zayıf kademedeki sinyalleri ayrı tut (tek tek göndermek yerine özetle)
+    strong_medium = [m for m in messages if "🔥" in m or "🟡" in m]
+    weak_only = [m for m in messages if "⚪" in m]
+
+    parts = []
+    if strong_medium:
+        parts.append("\n\n".join(strong_medium))
+    if weak_only:
+        parts.append(f"⚪ Ayrıca {len(weak_only)} hissede Zayıf kademede sinyal var (detay için botu genişletebiliriz).")
+
+    if parts:
+        full_message = f"📊 BIST Sinyal Botu\n\n" + "\n\n".join(parts)
         send_telegram_message(full_message)
         print(full_message)
     else:
