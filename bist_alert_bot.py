@@ -33,6 +33,22 @@ BUY_CONDITION = f"rsi < {TIERS[-1]['buy_rsi']}"
 SELL_CONDITION = f"rsi > {TIERS[-1]['sell_rsi']}"
 MIN_VOLUME = 500_000
 
+BUY_EMOJI = "🟢"
+SELL_EMOJI = "🔴"
+
+_MDV2_SPECIAL = r"_*[]()~`>#+-=|{}.!"
+
+
+def escape_mdv2(text: str) -> str:
+    """Telegram MarkdownV2 için özel karakterleri kaçış (escape) karakteriyle işaretler."""
+    result = []
+    for ch in text:
+        if ch in _MDV2_SPECIAL:
+            result.append("\\" + ch)
+        else:
+            result.append(ch)
+    return "".join(result)
+
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 API_URL = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
@@ -75,16 +91,19 @@ def save_state(state: dict) -> None:
 # TELEGRAM YARDIMCI FONKSİYONLARI
 # ---------------------------------------------------------------
 
-def send_telegram_message(text: str, chat_id: str = None) -> None:
+def send_telegram_message(text: str, chat_id: str = None, parse_mode: str = None) -> None:
     target = chat_id or TELEGRAM_CHAT_ID
     if not TELEGRAM_BOT_TOKEN or not target:
         print("UYARI: Telegram bilgileri eksik, mesaj gönderilemedi.")
         print(text)
         return
+    payload = {"chat_id": target, "text": text}
+    if parse_mode:
+        payload["parse_mode"] = parse_mode
     try:
         resp = requests.post(
             f"{API_URL}/sendMessage",
-            data={"chat_id": target, "text": text},
+            data=payload,
             timeout=20,
         )
         if resp.status_code != 200:
@@ -347,9 +366,17 @@ def run_scan(condition: str):
         volume = row.get("volume", 0) or 0
         if volume < MIN_VOLUME:
             continue
+        # Fiyat alanı borsapy sürümüne göre farklı adlarda gelebilir
+        price = row.get("price")
+        if price is None:
+            price = row.get("close")
+        if price is None:
+            price = row.get("last")
+        if price is None:
+            price = row.get("close_price")
         results.append({
             "symbol": row.get("symbol"),
-            "price": row.get("price"),
+            "price": price,
             "rsi": row.get("rsi"),
         })
     return results
@@ -368,7 +395,7 @@ def build_scan_report() -> str:
         tier = get_buy_tier(rsi)
         if tier:
             lines_by_tier[tier["name"]].append(
-                f"{tier['emoji']} {hit['symbol']} → AL (RSI {round(rsi, 1)}, {hit['price']} TL)"
+                f"{tier['emoji']}{BUY_EMOJI} {escape_mdv2(str(hit['symbol']))} \\({escape_mdv2(str(round(rsi, 1)))}\\)"
             )
 
     for hit in sell_hits:
@@ -378,24 +405,38 @@ def build_scan_report() -> str:
         tier = get_sell_tier(rsi)
         if tier:
             lines_by_tier[tier["name"]].append(
-                f"{tier['emoji']} {hit['symbol']} → SAT (RSI {round(rsi, 1)}, {hit['price']} TL)"
+                f"{tier['emoji']}{SELL_EMOJI} {escape_mdv2(str(hit['symbol']))} \\({escape_mdv2(str(round(rsi, 1)))}\\)"
             )
 
-    parts = ["📡 BIST SİNYAL TARAMASI\n"]
+    parts = ["📡 *BIST TARAMA*"]
     any_found = False
+
     for tier in TIERS:
+        if tier["name"] == "Zayıf":
+            continue
         items = lines_by_tier[tier["name"]]
         if items:
             any_found = True
-            shown = items[:15]
+            shown = items[:20]
             extra = len(items) - len(shown)
-            block = f"{tier['emoji']} {tier['name']} ({len(items)}):\n" + "\n".join(shown)
+            block = " · ".join(shown)
             if extra > 0:
-                block += f"\n... ve {extra} tane daha"
+                block += f" \\(\\+{extra}\\)"
             parts.append(block)
 
+    weak_items = lines_by_tier["Zayıf"]
+    if weak_items:
+        any_found = True
+        weak_text = " · ".join(weak_items[:40])
+        extra = len(weak_items) - min(len(weak_items), 40)
+        if extra > 0:
+            weak_text += f" \\(\\+{extra}\\)"
+        parts.append(f"⚪ {len(weak_items)} zayıf sinyal \\(görmek için dokun\\): ||{weak_text}||")
+
     if not any_found:
-        parts.append("Şu anda hiçbir hissede sinyal koşulu görülmüyor.")
+        parts.append("Şu anda sinyal yok\\.")
+
+    parts.append(f"\n{BUY_EMOJI} AL  {SELL_EMOJI} SAT  🔥 Güçlü  🟡 Orta  ⚪ Zayıf")
 
     return "\n\n".join(parts)
 
@@ -417,7 +458,8 @@ def run_background_scan(state: dict, new_state: dict) -> list:
         seen_symbols.add(symbol)
         label = f"AL-{tier['name']}"
         if state.get(symbol) != label:
-            messages.append(f"{tier['emoji']} {tier['name']} AL: {symbol} | Fiyat {hit['price']} TL | RSI {round(rsi,1)}")
+            line = f"{tier['emoji']}{BUY_EMOJI} {escape_mdv2(str(symbol))} \\({escape_mdv2(str(round(rsi,1)))}\\)"
+            messages.append((tier["name"], line))
             new_state[symbol] = label
 
     for hit in sell_hits:
@@ -430,7 +472,8 @@ def run_background_scan(state: dict, new_state: dict) -> list:
         seen_symbols.add(symbol)
         label = f"SAT-{tier['name']}"
         if state.get(symbol) != label:
-            messages.append(f"{tier['emoji']} {tier['name']} SAT: {symbol} | Fiyat {hit['price']} TL | RSI {round(rsi,1)}")
+            line = f"{tier['emoji']}{SELL_EMOJI} {escape_mdv2(str(symbol))} \\({escape_mdv2(str(round(rsi,1)))}\\)"
+            messages.append((tier["name"], line))
             new_state[symbol] = label
 
     for symbol in list(new_state.keys()):
@@ -472,7 +515,7 @@ def handle_command(text: str, chat_id: str, state: dict) -> None:
         else:
             send_telegram_message(analyze_symbol(arg), chat_id)
     elif command == "/tara":
-        send_telegram_message(build_scan_report(), chat_id)
+        send_telegram_message(build_scan_report(), chat_id, parse_mode="MarkdownV2")
     else:
         send_telegram_message("❓ Tanınmayan komut.\n\n" + HELP_TEXT, chat_id)
 
@@ -507,19 +550,23 @@ def main():
     # 1) Bekleyen komutları işle
     process_pending_commands(new_state)
 
-    # 2) Otomatik piyasa taraması (Güçlü/Orta tek tek, Zayıf özet)
+    # 2) Otomatik piyasa taraması (Güçlü/Orta tek satırda, Zayıf dokunarak açılır)
     messages = run_background_scan(state, new_state)
-    strong_medium = [m for m in messages if "🔥" in m or "🟡" in m]
-    weak_only = [m for m in messages if "⚪" in m]
+    strong_medium = [m for name, m in messages if name in ("Güçlü", "Orta")]
+    weak_lines = [m for name, m in messages if name == "Zayıf"]
 
     parts = []
     if strong_medium:
-        parts.append("\n".join(strong_medium))
-    if weak_only:
-        parts.append(f"⚪ Ayrıca {len(weak_only)} hissede Zayıf kademede sinyal var.")
+        parts.append(" · ".join(strong_medium))
+    if weak_lines:
+        weak_text = " · ".join(weak_lines)
+        parts.append(f"⚪ {len(weak_lines)} zayıf sinyal \\(görmek için dokun\\): ||{weak_text}||")
 
     if parts:
-        send_telegram_message("📊 BIST Sinyal Botu (otomatik tarama)\n\n" + "\n\n".join(parts))
+        send_telegram_message(
+            "📊 " + "\n\n".join(parts) + f"\n\n{BUY_EMOJI} AL  {SELL_EMOJI} SAT  🔥 Güçlü  🟡 Orta  ⚪ Zayıf",
+            parse_mode="MarkdownV2",
+        )
         print("Otomatik tarama: yeni sinyal bulundu, mesaj gönderildi.")
     else:
         print("Otomatik tarama: yeni sinyal yok.")
